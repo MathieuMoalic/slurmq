@@ -1,21 +1,12 @@
-// use std::path::PathBuf;
-
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-    // name: Option<String>,
-
-    // /// Sets a custom config file
-    // #[arg(short, long, value_name = "FILE")]
-    // config: Option<PathBuf>,
-
-    // /// Turn debugging information on
-    // #[arg(short, long, action = clap::ArgAction::Count)]
-    // debug: u8,
 }
 
 #[derive(Subcommand)]
@@ -33,32 +24,38 @@ enum Commands {
 }
 
 fn queue(path: &String) {
-    println!("{}", path);
+    match find_mx3(path) {
+        Some(mx3_paths) => println!("{:?}", mx3_paths),
+        _ => (),
+    }
+}
+
+fn find_mx3(path_string: &String) -> Option<Vec<PathBuf>> {
+    let mut mx3_paths: Vec<PathBuf> = vec![];
+    let path = Path::new(path_string);
+    if Path::new(path).exists() {
+        for entry in WalkDir::new(path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.into_path();
+            if p.is_file() {
+                let extension = p.extension().unwrap_or_default();
+                if extension == "mx3" {
+                    mx3_paths.push(p);
+                }
+            }
+        }
+    } else {
+        println!("Error: Invalid path: {}", path_string);
+        return None;
+    }
+    Some(mx3_paths)
 }
 
 fn main() {
     let cli = Cli::parse();
-
-    // // You can check the value provided by positional arguments, or option arguments
-    // if let Some(name) = cli.name.as_deref() {
-    //     println!("Value for name: {}", name);
-    // }
-
-    // if let Some(config_path) = cli.config.as_deref() {
-    //     println!("Value for config: {}", config_path.display());
-    // }
-
-    // You can see how many times a particular flag or argument occurred
-    // Note, only flags can have multiple occurrences
-    // match cli.debug {
-    //     0 => println!("Debug mode is off"),
-    //     1 => println!("Debug mode is kind of on"),
-    //     2 => println!("Debug mode is on"),
-    //     _ => println!("Don't be crazy"),
-    // }
-
-    // You can check for the existence of subcommands, and if found use their
-    // matches just as you would the top level cmd
     match &cli.command {
         Commands::Queue { path } => {
             queue(path);
@@ -69,8 +66,6 @@ fn main() {
             } else {
                 println!("Not printing testing lists...");
             }
-        } // None => {}
+        }
     }
-
-    // Continued program logic goes here...
 }
