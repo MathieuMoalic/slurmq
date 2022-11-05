@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0.18", features = ["derive"] }
+ssh2 = "0.9.3"
 walkdir = "2.3.2"
