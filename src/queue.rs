@@ -68,15 +68,15 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
                 }
             }
         }
-        if mx3_paths.len() == 0 {
+        if mx3_paths.is_empty() {
             error!("Couldn't find any .mx3 files in {}", src_dir.display());
-            return Err(());
+            Err(())
         } else {
-            return Ok(mx3_paths);
+            Ok(mx3_paths)
         }
     } else {
         error!("Directory not found : {}", src_dir.display());
-        return Err(());
+        Err(())
     }
 }
 
@@ -139,20 +139,20 @@ fn create_ssh_connection(config: Config) -> Result<Session, ()> {
 
 fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
     let command = format!("mkdir -p {}", dst_dir.display());
-    let stdout = send_command(&sess, &command)?;
+    let stdout = send_command(sess, &command)?;
     debug!("Sent command: `{}` \n  `{}`", command, stdout);
     Ok(())
 }
 
 fn transfer_mx3(sftp: &Sftp, src_mx3: Vec<PathBuf>, dst_mx3: &Vec<PathBuf>) -> Result<(), ()> {
-    for (src, dst) in src_mx3.into_iter().zip(dst_mx3.into_iter()) {
+    for (src, dst) in src_mx3.into_iter().zip(dst_mx3.iter()) {
         let src_buf = dlog(
             fs::read(&src),
             format!("Read source file {} into buffer", src.display()).as_str(),
             format!("Couldn't read source file {} into buffer", src.display()).as_str(),
         )?;
         let mut dest_buf = dlog(
-            sftp.create(&dst),
+            sftp.create(dst),
             format!("Created destination buffer {}", src.display()).as_str(),
             format!("Couldn't create destination buffer {}", src.display()).as_str(),
         )?;
@@ -183,7 +183,7 @@ fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
         "Error creating a channel",
     )?;
     dlog(
-        channel.exec(&command),
+        channel.exec(command),
         format!("Successfully executed `{}`", &command).as_str(),
         format!("Failed executing `{}`", &command).as_str(),
     )?;
@@ -227,11 +227,11 @@ fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>) -> Result<(), ()> {
         let log_path = mx3_path.replace(".mx3", ".zarr/slurm_calc.logs");
         let job_name = mx3.file_stem().unwrap().to_str().unwrap();
         let command = format!("mkdir -p {zarr_path}");
-        let stdout = send_command(&sess, &command)?;
+        let stdout = send_command(sess, &command)?;
         debug!("Sent command: `{}` \n  `{}`", command, stdout);
         let command =
             format!("sbatch --job-name={job_name} --output={log_path} {SBATCH1_PATH} {mx3_path}");
-        let stdout = send_command(&sess, &command)?;
+        let stdout = send_command(sess, &command)?;
         debug!("Sent command: `{}` \n  `{}`", command, stdout);
 
         // mx3_path=$PWD/$arg
