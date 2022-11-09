@@ -1,15 +1,13 @@
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
+// #![allow(unused_imports)]
+// #![allow(unused_variables)]
+// #![allow(dead_code)]
+#![warn(clippy::pedantic)]
 mod config;
 mod logging;
 mod queue;
 mod tunnel;
 
-use std::path::Path;
-
 use clap::{Parser, Subcommand};
-use log::{debug, error};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

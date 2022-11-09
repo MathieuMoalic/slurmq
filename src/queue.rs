@@ -1,33 +1,24 @@
-use crate::{
-    config::{load_config, Config},
-    logging::dlog,
-    REMOTE_JOB_DIR, SBATCH1_PATH,
-};
+use crate::{config, logging::dlog, REMOTE_JOB_DIR, SBATCH1_PATH};
 use log::{debug, error, info};
 use ssh2::{Session, Sftp};
-use ssh2_config::SshConfig;
 use std::{
     fs,
-    io::{BufRead, Read, Write},
+    io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
 pub fn main(src_dir: &String, host: &String) {
-    let config = match load_config(host.to_string()) {
-        Ok(config) => config,
-        Err(_) => {
-            debug!("Failed loading the SSH config");
-            return;
-        }
+    let conf = if let Ok(conf) = config::load(host.to_string()) {
+        conf
+    } else {
+        debug!("Failed loading the SSH config");
+        return;
     };
-    match queue(src_dir, config) {
-        Ok(()) => {}
-        Err(_) => (),
-    }
+    if let Ok(()) = queue(src_dir, &conf) {}
 }
-pub fn queue(src_dir: &String, config: Config) -> Result<(), ()> {
+pub fn queue(src_dir: &String, config: &config::Config) -> Result<(), ()> {
     let src_dir = Path::new(src_dir);
     info!("Source directory: {}", src_dir.display());
     let src_mx3 = get_src_mx3(src_dir)?;
@@ -58,7 +49,7 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
             .max_depth(1)
             .follow_links(true)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
         {
             let p = entry.into_path();
             if p.is_file() {
@@ -82,7 +73,7 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
 
 fn get_dst_dir(src_dir: &Path) -> PathBuf {
     let dst_dir = src_dir.strip_prefix(src_dir.parent().unwrap()).unwrap();
-    let dst_dir = Path::new(&format!("./{}", REMOTE_JOB_DIR)).join(dst_dir);
+    let dst_dir = Path::new(&format!("./{REMOTE_JOB_DIR}")).join(dst_dir);
     dst_dir
 }
 
@@ -106,7 +97,7 @@ fn get_dst_mx3(src_mx3: &Vec<PathBuf>, src_dir: &Path, dst_dir: &Path) -> Result
     Ok(dst_mx3)
 }
 
-fn create_ssh_connection(config: Config) -> Result<Session, ()> {
+fn create_ssh_connection(config: &config::Config) -> Result<Session, ()> {
     let mut sess = Session::new().unwrap();
     let tcp = dlog(
         TcpStream::connect(&config.addr),
@@ -144,7 +135,7 @@ fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
     Ok(())
 }
 
-fn transfer_mx3(sftp: &Sftp, src_mx3: Vec<PathBuf>, dst_mx3: &Vec<PathBuf>) -> Result<(), ()> {
+fn transfer_mx3(sftp: &Sftp, src_mx3: Vec<PathBuf>, dst_mx3: &[PathBuf]) -> Result<(), ()> {
     for (src, dst) in src_mx3.into_iter().zip(dst_mx3.iter()) {
         let src_buf = dlog(
             fs::read(&src),
@@ -204,18 +195,17 @@ fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
         "Got exit code",
         "Failed while getting exit code",
     )?;
-    match exit_code {
-        0 => Ok(stdout),
-        _ => {
-            let mut stderr = vec![];
-            channel.stderr().read_to_end(&mut stderr).unwrap();
-            let stderr = String::from_utf8(stderr).unwrap();
-            error!(
-                "Command `{}` failed with exit code {}:\n {:?}",
-                &command, exit_code, stderr
-            );
-            Err(())
-        }
+    if exit_code == 0 {
+        Ok(stdout)
+    } else {
+        let mut stderr = vec![];
+        channel.stderr().read_to_end(&mut stderr).unwrap();
+        let stderr = String::from_utf8(stderr).unwrap();
+        error!(
+            "Command `{}` failed with exit code {}:\n {:?}",
+            &command, exit_code, stderr
+        );
+        Err(())
     }
 }
 
@@ -224,7 +214,7 @@ fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>) -> Result<(), ()> {
         let mx3_path = mx3.to_str().unwrap();
         let zarr_path = mx3_path.replace(".mx3", ".zarr");
         let log_path = mx3_path.replace(".mx3", ".zarr/slurm.logs");
-        let log_path = mx3_path.replace(".mx3", ".zarr/slurm_calc.logs");
+        // let calc_log_path = mx3_path.replace(".mx3", ".zarr/slurm_calc.logs");
         let job_name = mx3.file_stem().unwrap().to_str().unwrap();
         let command = format!("mkdir -p {zarr_path}");
         let stdout = send_command(sess, &command)?;
