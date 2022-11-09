@@ -1,15 +1,33 @@
-use crate::{config::Config, logging::dlog};
+use crate::{
+    config::{load_config, Config},
+    logging::dlog,
+    REMOTE_JOB_DIR, SBATCH1_PATH,
+};
 use log::{debug, error, info};
 use ssh2::{Session, Sftp};
+use ssh2_config::SshConfig;
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
-pub(crate) fn queue(src_dir: &String, config: Config) -> Result<(), ()> {
+pub fn main(src_dir: &String, host: &String) {
+    let config = match load_config(host.to_string()) {
+        Ok(config) => config,
+        Err(_) => {
+            debug!("Failed loading the SSH config");
+            return;
+        }
+    };
+    match queue(src_dir, config) {
+        Ok(()) => {}
+        Err(_) => (),
+    }
+}
+pub fn queue(src_dir: &String, config: Config) -> Result<(), ()> {
     let src_dir = Path::new(src_dir);
     info!("Source directory: {}", src_dir.display());
     let src_mx3 = get_src_mx3(src_dir)?;
@@ -24,7 +42,7 @@ pub(crate) fn queue(src_dir: &String, config: Config) -> Result<(), ()> {
         "Failed making the SFTP connection",
     )?;
     info!("SSH connection successful");
-    create_dst_dir(&sftp, &dst_dir)?;
+    create_dst_dir(&sess, &dst_dir)?;
     info!("Destination directory created");
     transfer_mx3(&sftp, src_mx3, &dst_mx3)?;
     info!("All .mx3 files transfered successfully.");
@@ -64,7 +82,7 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
 
 fn get_dst_dir(src_dir: &Path) -> PathBuf {
     let dst_dir = src_dir.strip_prefix(src_dir.parent().unwrap()).unwrap();
-    let dst_dir = Path::new("./").join(dst_dir);
+    let dst_dir = Path::new(&format!("./{}", REMOTE_JOB_DIR)).join(dst_dir);
     dst_dir
 }
 
@@ -89,21 +107,12 @@ fn get_dst_mx3(src_mx3: &Vec<PathBuf>, src_dir: &Path, dst_dir: &Path) -> Result
 }
 
 fn create_ssh_connection(config: Config) -> Result<Session, ()> {
-    let mut addr = config.server_ip.to_owned();
-    addr.push(':');
-    addr.push_str(&config.server_port.to_string());
-    let private_key = Path::new(&config.key_path);
-    if !private_key.exists() {
-        error!("key_file `{}` doesn't exist.", private_key.display());
-        return Err(());
-    }
     let mut sess = Session::new().unwrap();
     let tcp = dlog(
-        TcpStream::connect(&addr),
+        TcpStream::connect(&config.addr),
         "TCP connection created",
-        format!("Couldn't make a TCP connection to {addr}").as_str(),
+        format!("Couldn't make a TCP connection to {}", &config.addr).as_str(),
     )?;
-    // .map_err(|_| format!("Couldn't make a TCP connection to {addr}"))?;
     sess.set_tcp_stream(tcp);
     dlog(
         sess.handshake(),
@@ -111,37 +120,27 @@ fn create_ssh_connection(config: Config) -> Result<Session, ()> {
         "Handshake with the server failed.",
     )?;
     dlog(
-        sess.userauth_pubkey_file("mat", None, private_key, None),
+        sess.userauth_pubkey_file(&config.user, None, &config.key, None),
         format!(
             "Sucessful SSH authentication to `{}` with keyfile `{}`",
-            addr,
-            private_key.display()
+            &config.addr,
+            &config.key.display()
         )
         .as_str(),
         format!(
             "SSH authentication failed to `{}` with keyfile `{}`",
-            addr,
-            private_key.display()
+            &config.addr,
+            &config.key.display()
         )
         .as_str(),
     )?;
     Ok(sess)
 }
 
-fn create_dst_dir(sftp: &Sftp, dst_dir: &Path) -> Result<(), ()> {
-    let stats = dlog(
-        sftp.readdir(Path::new(".")),
-        "Read the SFTP home directory",
-        "Couldn't read the SFTP home directory",
-    )?;
-    let dst_dir_exists = stats.into_iter().any(|(p, _)| p == dst_dir);
-    if !dst_dir_exists {
-        dlog(
-            sftp.mkdir(&dst_dir, 0o775),
-            format!("Made `{}` on the SFTP server", dst_dir.display()).as_str(),
-            format!("Couldn't make `{}` on the SFTP server", dst_dir.display()).as_str(),
-        )?;
-    }
+fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
+    let command = format!("mkdir -p {}", dst_dir.display());
+    let stdout = send_command(&sess, &command)?;
+    debug!("Sent command: `{}` \n  `{}`", command, stdout);
     Ok(())
 }
 
@@ -188,25 +187,63 @@ fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
         format!("Successfully executed `{}`", &command).as_str(),
         format!("Failed executing `{}`", &command).as_str(),
     )?;
-    let mut command_output = String::new();
+    let mut stdout = String::new();
     dlog(
-        channel.read_to_string(&mut command_output),
-        format!("Output: `{}`", &command_output).as_str(),
+        channel.read_to_string(&mut stdout),
+        format!("Output: `{}`", &stdout).as_str(),
         format!("Couldn't read output from `{}`", &command).as_str(),
     )?;
+
     dlog(
         channel.wait_close(),
         "Closed the channel",
         "Error closing the channel",
     )?;
-    Ok(command_output)
+    let exit_code = dlog(
+        channel.exit_status(),
+        "Got exit code",
+        "Failed while getting exit code",
+    )?;
+    match exit_code {
+        0 => Ok(stdout),
+        _ => {
+            let mut stderr = vec![];
+            channel.stderr().read_to_end(&mut stderr).unwrap();
+            let stderr = String::from_utf8(stderr).unwrap();
+            error!(
+                "Command `{}` failed with exit code {}:\n {:?}",
+                &command, exit_code, stderr
+            );
+            Err(())
+        }
+    }
 }
 
 fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>) -> Result<(), ()> {
     for mx3 in dst_mx3 {
-        let command = format!("sbatch {}", mx3.display());
-        let s = send_command(&sess, &command)?;
-        debug!("Sent command: `{}` \n  `{}`", command, s);
+        let mx3_path = mx3.to_str().unwrap();
+        let zarr_path = mx3_path.replace(".mx3", ".zarr");
+        let log_path = mx3_path.replace(".mx3", ".zarr/slurm.logs");
+        let log_path = mx3_path.replace(".mx3", ".zarr/slurm_calc.logs");
+        let job_name = mx3.file_stem().unwrap().to_str().unwrap();
+        let command = format!("mkdir -p {zarr_path}");
+        let stdout = send_command(&sess, &command)?;
+        debug!("Sent command: `{}` \n  `{}`", command, stdout);
+        let command =
+            format!("sbatch --job-name={job_name} --output={log_path} {SBATCH1_PATH} {mx3_path}");
+        let stdout = send_command(&sess, &command)?;
+        debug!("Sent command: `{}` \n  `{}`", command, stdout);
+
+        // mx3_path=$PWD/$arg
+        // zarr_path="${mx3_path/.mx3/.zarr}"
+        // log_path=$zarr_path/slurm.logs
+        // calc_log_path=$zarr_path/slurm_calc.logs
+        // batch_name="$(basename "$(dirname $mx3_path)")"
+        // job_name="${arg/.mx3/}"
+        // mkdir -p $zarr_path
+        // JobID=$(sbatch --job-name="$job_name" --output="$log_path" $HOME/sbatch/amumax.sh $mx3_path | cut -f 4 -d' ')
+        // sbatch -d afterany:$JobID --job-name="calc_$job_name" --output=$calc_log_path $HOME/sbatch/amumax_post.sh $zarr_path $batch_name $calc_modes > /dev/null
+        // echo " - Submitted job for ${job_name}.mx3"
     }
     Ok(())
 }

@@ -6,10 +6,10 @@ mod logging;
 mod queue;
 mod tunnel;
 
-use std::f32::consts::E;
+use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use log::error;
+use log::{debug, error};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -21,22 +21,22 @@ struct Cli {
     command: Commands,
 }
 
+const SSH_CONFIG_PATH: &str = "~/.ssh/config";
+const SBATCH1_PATH: &str = "~/sbatch/amumax_fast.sh";
+const REMOTE_JOB_DIR: &str = "jobs";
+
 #[derive(Subcommand)]
 enum Commands {
     /// Queue mx3 files in `path` to pcss
     Queue {
         #[arg()]
+        host: String,
+        #[arg()]
         path: String,
     },
-    // Pf {
-    //     /// lists test values
-    //     #[arg(short, long)]
-    //     list: bool,
-    // },
 }
 
 fn main() {
-    let config = config::load_config().expect("Error loading the config");
     let cli = Cli::parse();
     env_logger::Builder::new()
         .filter_level(cli.verbose.log_level_filter())
@@ -45,9 +45,6 @@ fn main() {
         .init();
 
     match &cli.command {
-        Commands::Queue { path } => match queue::queue(path, config) {
-            Ok(()) => {}
-            Err(_) => (),
-        }, // Commands::Pf { _ } => (),
+        Commands::Queue { path, host } => queue::main(path, host),
     }
 }
