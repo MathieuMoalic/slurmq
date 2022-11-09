@@ -379,23 +379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcss"
-version = "0.1.0"
-dependencies = [
- "clap",
- "clap-verbosity-flag",
- "confy",
- "env_logger",
- "expanduser",
- "log",
- "serde",
- "serde_derive",
- "ssh2",
- "ssh2-config",
- "walkdir",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -552,6 +535,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "slurmq"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap-verbosity-flag",
+ "confy",
+ "env_logger",
+ "expanduser",
+ "log",
+ "serde",
+ "serde_derive",
+ "ssh2",
+ "ssh2-config",
+ "walkdir",
 ]
 
 [[package]]
