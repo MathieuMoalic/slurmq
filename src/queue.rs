@@ -1,4 +1,4 @@
-use crate::{config, logging::dlog, REMOTE_JOB_DIR, SBATCH1_PATH};
+use crate::config::{self, Config};
 use log::{debug, error, info};
 use ssh2::{Session, Sftp};
 use std::{
@@ -9,37 +9,58 @@ use std::{
 };
 use walkdir::WalkDir;
 
-pub fn main(src_dir: &String, host: &String) {
-    let conf = if let Ok(conf) = config::load(host.to_string()) {
-        conf
-    } else {
-        debug!("Failed loading the SSH config");
+pub fn main(config: Config, sbatch: &String, input_dir: &String, dst_dir: &String) {
+    if queue(input_dir, sbatch, &config, dst_dir) == Ok(()) {
         return;
-    };
-    if let Ok(()) = queue(src_dir, &conf) {}
+    }
 }
-pub fn queue(src_dir: &String, config: &config::Config) -> Result<(), ()> {
-    let src_dir = Path::new(src_dir);
-    info!("Source directory: {}", src_dir.display());
-    let src_mx3 = get_src_mx3(src_dir)?;
+
+fn queue(
+    src_dir: &String,
+    sbatch: &String,
+    config: &config::Config,
+    dst_jobs_dir: &String,
+) -> Result<(), ()> {
+    let sbatch_path = get_sbatch(sbatch)?;
+    let src_dir = get_src_dir(src_dir)?;
+    let src_mx3 = get_src_mx3(&src_dir)?;
     info!("Found these mx3 files: {:#?}", src_mx3);
-    let dst_dir = get_dst_dir(src_dir);
-    let dst_mx3 = get_dst_mx3(&src_mx3, src_dir, &dst_dir)?;
+    let dst_dir = get_dst_dir(&src_dir, &dst_jobs_dir)?;
+    let dst_mx3 = get_dst_mx3(&src_mx3, &src_dir, &dst_dir)?;
     debug!("List of mx3 destination paths: {:#?}", dst_mx3);
-    let sess = create_ssh_connection(config)?;
-    let sftp = dlog(
-        sess.sftp(),
-        "Made SFTP connection",
-        "Failed making the SFTP connection",
-    )?;
+    let (sess, sftp) = create_ssh_connection(config)?;
     info!("SSH connection successful");
     create_dst_dir(&sess, &dst_dir)?;
     info!("Destination directory created");
     transfer_mx3(&sftp, src_mx3, &dst_mx3)?;
     info!("All .mx3 files transfered successfully.");
-    start_jobs(&sess, dst_mx3)?;
+    transfer_sbatch(&sftp, &sbatch_path, &dst_jobs_dir)?;
+    info!("Sbatch file transfered successfully.");
+    start_jobs(&sess, dst_mx3, sbatch)?;
     info!("All jobs started successfully.");
     Ok(())
+}
+
+fn get_sbatch(sbatch: &String) -> Result<PathBuf, ()> {
+    let sbatch = Path::new(sbatch);
+    if sbatch.exists() {
+        debug!("Found {}", sbatch.display());
+        return Ok(sbatch.to_path_buf());
+    } else {
+        error!("Sbatch file {} doesn't exist", sbatch.display());
+        return Err(());
+    }
+}
+
+fn get_src_dir(src_dir: &String) -> Result<PathBuf, ()> {
+    let src_dir = Path::new(src_dir);
+    if src_dir.exists() {
+        debug!("Found input directory {}", src_dir.display());
+        return Ok(src_dir.to_path_buf());
+    } else {
+        error!("Input directory {} doesn't exist", src_dir.display());
+        return Err(());
+    }
 }
 
 fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
@@ -71,61 +92,113 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
     }
 }
 
-fn get_dst_dir(src_dir: &Path) -> PathBuf {
-    let dst_dir = src_dir.strip_prefix(src_dir.parent().unwrap()).unwrap();
-    let dst_dir = Path::new(&format!("./{REMOTE_JOB_DIR}")).join(dst_dir);
-    dst_dir
+fn get_dst_dir(src_dir: &Path, dst_jobs_dir: &String) -> Result<PathBuf, ()> {
+    let parent = match src_dir.parent() {
+        Some(s) => {
+            debug!("Parent dir:  `{}`", s.display());
+            s
+        }
+        None => {
+            error!("Error getting the parent of `{}`", src_dir.display());
+            return Err(());
+        }
+    };
+    let dst_dir = match src_dir.strip_prefix(parent) {
+        Ok(s) => {
+            debug!("Source dir with stripped path: `{}`", s.display());
+            s
+        }
+        Err(s) => {
+            error!(
+                "Couldn't stripped prefix: `{}` from `{}`",
+                parent.display(),
+                s
+            );
+            return Err(());
+        }
+    };
+    let dst_dir = Path::new(&format!("{}", dst_jobs_dir)).join(dst_dir);
+    debug!("Destination dir: `{}`", dst_dir.display());
+    Ok(dst_dir)
 }
 
 fn get_dst_mx3(src_mx3: &Vec<PathBuf>, src_dir: &Path, dst_dir: &Path) -> Result<Vec<PathBuf>, ()> {
     let mut dst_mx3 = vec![];
     for src in src_mx3 {
-        let dest = src.strip_prefix(src_dir);
-        let dest = dlog(
-            dest,
-            format!("Stripped `{}` from `{}`", src_dir.display(), src.display()).as_str(),
-            format!(
-                "Couldn't strip `{}` from `{}`",
-                src_dir.display(),
-                src.display()
-            )
-            .as_str(),
-        );
-        let dest = dst_dir.join(dest?);
+        let dest = match src.strip_prefix(src_dir) {
+            Ok(s) => {
+                debug!(
+                    "Stripped `{}` from `{}` : `{}`",
+                    src_dir.display(),
+                    src.display(),
+                    s.display()
+                );
+                s
+            }
+            Err(s) => {
+                error!(
+                    "Couldn't strip `{}` from `{}` \n {s}",
+                    src_dir.display(),
+                    src.display()
+                );
+                return Err(());
+            }
+        };
+        let dest = dst_dir.join(dest);
         dst_mx3.push(dest);
     }
     Ok(dst_mx3)
 }
 
-fn create_ssh_connection(config: &config::Config) -> Result<Session, ()> {
-    let mut sess = Session::new().unwrap();
-    let tcp = dlog(
-        TcpStream::connect(&config.addr),
-        "TCP connection created",
-        format!("Couldn't make a TCP connection to {}", &config.addr).as_str(),
-    )?;
+fn create_ssh_connection(config: &config::Config) -> Result<(Session, Sftp), ()> {
+    let mut sess = match Session::new() {
+        Ok(sess) => {
+            debug!("Created SSH session");
+            sess
+        }
+        Err(e) => {
+            error!("Error creating the SSH session: {}", e);
+            return Err(());
+        }
+    };
+    let tcp = match TcpStream::connect(&config.addr) {
+        Ok(tcp) => {
+            debug!("TCP connection created");
+            tcp
+        }
+        Err(e) => {
+            error!("Couldn't make a TCP connection to {} : {}", &config.addr, e);
+            return Err(());
+        }
+    };
     sess.set_tcp_stream(tcp);
-    dlog(
-        sess.handshake(),
-        "Successful TCP handshake with the server.",
-        "Handshake with the server failed.",
-    )?;
-    dlog(
-        sess.userauth_pubkey_file(&config.user, None, &config.key, None),
-        format!(
+    match sess.handshake() {
+        Ok(_) => debug!("Successful TCP handshake with the server."),
+        Err(_) => error!("Handshake with the server failed."),
+    };
+    match sess.userauth_pubkey_file(&config.user, None, &config.key, None) {
+        Ok(_) => debug!(
             "Sucessful SSH authentication to `{}` with keyfile `{}`",
             &config.addr,
             &config.key.display()
-        )
-        .as_str(),
-        format!(
+        ),
+        Err(_) => error!(
             "SSH authentication failed to `{}` with keyfile `{}`",
             &config.addr,
             &config.key.display()
-        )
-        .as_str(),
-    )?;
-    Ok(sess)
+        ),
+    };
+    let sftp = match sess.sftp() {
+        Ok(sftp) => {
+            debug!("Made SFTP connection");
+            sftp
+        }
+        Err(e) => {
+            error!("Failed making the SFTP connection");
+            return Err(());
+        }
+    };
+    Ok((sess, sftp))
 }
 
 fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
@@ -137,79 +210,185 @@ fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
 
 fn transfer_mx3(sftp: &Sftp, src_mx3: Vec<PathBuf>, dst_mx3: &[PathBuf]) -> Result<(), ()> {
     for (src, dst) in src_mx3.into_iter().zip(dst_mx3.iter()) {
-        let src_buf = dlog(
-            fs::read(&src),
-            format!("Read source file {} into buffer", src.display()).as_str(),
-            format!("Couldn't read source file {} into buffer", src.display()).as_str(),
-        )?;
-        let mut dest_buf = dlog(
-            sftp.create(dst),
-            format!("Created destination buffer {}", src.display()).as_str(),
-            format!("Couldn't create destination buffer {}", src.display()).as_str(),
-        )?;
-        dlog(
-            dest_buf.write_all(&src_buf),
-            format!(
-                "Wrote source file {} into destination buffer {}",
-                src.display(),
-                dst.display()
-            )
-            .as_str(),
-            format!(
-                "Couldn't write source file {} into destination buffer {}",
-                src.display(),
-                dst.display()
-            )
-            .as_str(),
-        )?;
+        let src_buf = match fs::read(&src) {
+            Ok(src_buf) => {
+                debug!("Read source file {} into buffer", src.display());
+                src_buf
+            }
+            Err(_) => {
+                error!("Couldn't read source file {} into buffer", src.display());
+                return Err(());
+            }
+        };
+        let mut dest_buf = match sftp.create(dst) {
+            Ok(dest_buf) => {
+                debug!("Created destination buffer {}", src.display());
+                dest_buf
+            }
+            Err(_) => {
+                error!("Couldn't create destination buffer {}", src.display());
+                return Err(());
+            }
+        };
+        match dest_buf.write_all(&src_buf) {
+            Ok(dest_buf) => {
+                debug!(
+                    "Wrote source file {} into destination buffer {}",
+                    src.display(),
+                    dst.display()
+                );
+                dest_buf
+            }
+            Err(_) => {
+                error!(
+                    "Couldn't write source file {} into destination buffer {}",
+                    src.display(),
+                    dst.display()
+                );
+                return Err(());
+            }
+        };
         info!("Transfered {}", dst.display());
     }
     Ok(())
 }
 
-fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
-    let mut channel = dlog(
-        sess.channel_session(),
-        "Created channel",
-        "Error creating a channel",
-    )?;
-    dlog(
-        channel.exec(command),
-        format!("Successfully executed `{}`", &command).as_str(),
-        format!("Failed executing `{}`", &command).as_str(),
-    )?;
-    let mut stdout = String::new();
-    dlog(
-        channel.read_to_string(&mut stdout),
-        format!("Output: `{}`", &stdout).as_str(),
-        format!("Couldn't read output from `{}`", &command).as_str(),
-    )?;
+fn transfer_sbatch(sftp: &Sftp, src: &PathBuf, dst_jobs_dir: &String) -> Result<(), ()> {
+    let src_buf = match fs::read(&src) {
+        Ok(src_buf) => {
+            debug!("Read source file {} into buffer", src.display());
+            src_buf
+        }
+        Err(_) => {
+            error!("Couldn't read source file {} into buffer", src.display());
+            return Err(());
+        }
+    };
+    let dst = match Path::new(src).file_name() {
+        Some(dst) => {
+            debug!("Sbatch filename: {}", dst.to_string_lossy());
+            dst.as_ref()
+        }
+        None => {
+            error!("Couldn't get sbatch filename");
+            return Err(());
+        }
+    };
+    let mut dst_buf = match sftp.create(dst) {
+        Ok(dest_buf) => {
+            debug!("Created destination buffer {}", src.display());
+            dest_buf
+        }
+        Err(_) => {
+            error!("Couldn't create destination buffer {}", src.display());
+            return Err(());
+        }
+    };
+    match dst_buf.write_all(&src_buf) {
+        Ok(dest_buf) => {
+            debug!(
+                "Wrote source file {} into destination buffer {}",
+                src.display(),
+                dst.display()
+            );
+            dest_buf
+        }
+        Err(_) => {
+            error!(
+                "Couldn't write source file {} into destination buffer {}",
+                src.display(),
+                dst.display()
+            );
+            return Err(());
+        }
+    };
+    info!("Transfered {}", dst.display());
 
-    dlog(
-        channel.wait_close(),
-        "Closed the channel",
-        "Error closing the channel",
-    )?;
-    let exit_code = dlog(
-        channel.exit_status(),
-        "Got exit code",
-        "Failed while getting exit code",
-    )?;
+    Ok(())
+}
+
+fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
+    let mut channel = match sess.channel_session() {
+        Ok(channel) => {
+            debug!("Created channel");
+            channel
+        }
+        Err(e) => {
+            error!("Error creating channel: {}", e);
+            return Err(());
+        }
+    };
+    match channel.exec(command) {
+        Ok(_) => {
+            debug!("Successfully executed `{}`", &command);
+        }
+        Err(e) => {
+            error!("Failed executing `{}` :{}", &command, e);
+            return Err(());
+        }
+    };
+    let mut stdout = String::new();
+    match channel.read_to_string(&mut stdout) {
+        Ok(_) => {
+            debug!("Output: `{}`", &stdout);
+        }
+        Err(e) => {
+            error!("Couldn't read output from `{}` : {}", &command, e);
+            return Err(());
+        }
+    };
+    match channel.wait_close() {
+        Ok(_) => {
+            debug!("Closed the channel");
+        }
+        Err(e) => {
+            error!("Error closing the channel: {}", e);
+            return Err(());
+        }
+    };
+    let exit_code = match channel.exit_status() {
+        Ok(exit_code) => {
+            debug!("Got exit code");
+            exit_code
+        }
+        Err(e) => {
+            error!("Failed while getting exit code: {}", e);
+            return Err(());
+        }
+    };
     if exit_code == 0 {
         Ok(stdout)
     } else {
         let mut stderr = vec![];
-        channel.stderr().read_to_end(&mut stderr).unwrap();
-        let stderr = String::from_utf8(stderr).unwrap();
-        error!(
-            "Command `{}` failed with exit code {}:\n {:?}",
-            &command, exit_code, stderr
-        );
+        let exit_code = match channel.stderr().read_to_end(&mut stderr) {
+            Ok(exit_code) => {
+                debug!("Read stderr");
+                exit_code
+            }
+            Err(e) => {
+                error!("Error reading stderr: {}", e);
+                return Err(());
+            }
+        };
+        match String::from_utf8(stderr) {
+            Ok(stderr) => {
+                error!(
+                    "Command `{}` failed with exit code {}:\n {:?}",
+                    &command,
+                    exit_code,
+                    stderr.as_str()
+                );
+            }
+            Err(e) => {
+                error!("Error reading stderr: {}", e);
+                return Err(());
+            }
+        };
         Err(())
     }
 }
 
-fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>) -> Result<(), ()> {
+fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>, sbatch: &String) -> Result<(), ()> {
     for mx3 in dst_mx3 {
         let mx3_path = mx3.to_str().unwrap();
         let zarr_path = mx3_path.replace(".mx3", ".zarr");
@@ -220,7 +399,7 @@ fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>) -> Result<(), ()> {
         let stdout = send_command(sess, &command)?;
         debug!("Sent command: `{}` \n  `{}`", command, stdout);
         let command =
-            format!("sbatch --job-name={job_name} --output={log_path} {SBATCH1_PATH} {mx3_path}");
+            format!("sbatch --job-name={job_name} --output={log_path} {sbatch} {mx3_path}");
         let stdout = send_command(sess, &command)?;
         debug!("Sent command: `{}` \n  `{}`", command, stdout);
 

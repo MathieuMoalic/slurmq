@@ -1,13 +1,17 @@
 // #![allow(unused_imports)]
 // #![allow(unused_variables)]
 // #![allow(dead_code)]
+// #![allow(clippy::all)]
+// #![warn(clippy::restriction)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+// #![warn(clippy::cargo)]
 mod config;
-mod logging;
 mod queue;
 mod tunnel;
 
 use clap::{Parser, Subcommand};
+use log::{debug, error};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -17,20 +21,22 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+    #[arg(long, default_value_t = String::from("~/.ssh/config"))]
+    config_path: String,
+    #[arg(long, default_value_t = String::from("pcss"))]
+    host: String,
 }
-
-const SSH_CONFIG_PATH: &str = "~/.ssh/config";
-const SBATCH1_PATH: &str = "~/sbatch/amumax_fast.sh";
-const REMOTE_JOB_DIR: &str = "jobs";
 
 #[derive(Subcommand)]
 enum Commands {
     /// Queue mx3 files in `path` to pcss
     Queue {
-        #[arg()]
-        host: String,
-        #[arg()]
-        path: String,
+        #[arg(short, long)]
+        sbatch: String,
+        #[arg(short, long)]
+        input_dir: String,
+        #[arg(long, default_value_t = String::from("./jobs"))]
+        dst_dir: String,
     },
 }
 
@@ -41,8 +47,21 @@ fn main() {
         .format_timestamp(None)
         .format_target(false)
         .init();
-
+    let config = match config::load(cli.host, cli.config_path) {
+        Ok(config) => {
+            debug!("SSH config loaded: {:#?}", config);
+            config
+        }
+        Err(_) => {
+            error!("Error loading the SSH config");
+            return;
+        }
+    };
     match &cli.command {
-        Commands::Queue { path, host } => queue::main(path, host),
+        Commands::Queue {
+            sbatch,
+            input_dir,
+            dst_dir,
+        } => queue::main(config, sbatch, input_dir, dst_dir),
     }
 }
