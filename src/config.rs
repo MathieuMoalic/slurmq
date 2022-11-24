@@ -10,8 +10,8 @@ pub struct Config {
     pub key: PathBuf,
 }
 
-pub fn load(host: String, config_path: String) -> Result<Config, ()> {
-    let p = match expanduser::expanduser(&config_path) {
+pub fn load(host: &str, config_path: &str) -> Result<Config, ()> {
+    let p = match expanduser::expanduser(config_path) {
         Ok(p) => {
             debug!("Got SSH config path");
             p
@@ -44,64 +44,52 @@ pub fn load(host: String, config_path: String) -> Result<Config, ()> {
             return Err(());
         }
     };
-    let host_config = config.query(&host);
-    let mut addr = match host_config.host_name {
-        Some(addr) => {
-            debug!("SSH server address: {}", addr);
-            addr
-        }
-        None => {
-            error!("`{}` was not found in the ssh config file", &host);
-            return Err(());
-        }
+    let host_config = config.query(host);
+    let mut addr = if let Some(addr) = host_config.host_name {
+        debug!("SSH server address: {}", addr);
+        addr
+    } else {
+        error!("`{}` was not found in the ssh config file", &host);
+        return Err(());
     };
-    let port = match host_config.port {
-        Some(port) => {
-            debug!("SSH port: {}", port);
-            port
-        }
-        None => {
+    let port = host_config.port.map_or_else(
+        || {
             debug!("Port was not found in the ssh config file, using default: 22");
             22
-        }
-    };
+        },
+        |port| {
+            debug!("SSH port: {}", port);
+            port
+        },
+    );
     addr.push(':');
     addr.push_str(&port.to_string());
-    let user = match host_config.user {
-        Some(user) => {
-            debug!("SSH user: {}", user);
-            user
-        }
-        None => {
-            error!("`User` was not found in the ssh config file");
-            return Err(());
-        }
+    let user = if let Some(user) = host_config.user {
+        debug!("SSH user: {}", user);
+        user
+    } else {
+        error!("`User` was not found in the ssh config file");
+        return Err(());
     };
-    let keys = match host_config.identity_file {
-        Some(keys) => {
-            debug!("SSH keys: {:?}", keys);
-            keys
-        }
-        None => {
-            error!(
-                "No key file was found for `{}` in the ssh config file",
-                &host
-            );
-            return Err(());
-        }
+    let keys = if let Some(keys) = host_config.identity_file {
+        debug!("SSH keys: {:?}", keys);
+        keys
+    } else {
+        error!(
+            "No key file was found for `{}` in the ssh config file",
+            &host
+        );
+        return Err(());
     };
-    let key = match keys.first() {
-        Some(key) => {
-            debug!("Using the first key: {}", key.display());
-            key.clone()
-        }
-        None => {
-            error!(
-                "No key file was found for `{}` in the ssh config file",
-                &host
-            );
-            return Err(());
-        }
+    let key = if let Some(key) = keys.first() {
+        debug!("Using the first key: {}", key.display());
+        key.clone()
+    } else {
+        error!(
+            "No key file was found for `{}` in the ssh config file",
+            &host
+        );
+        return Err(());
     };
     Ok(Config { addr, user, key })
 }

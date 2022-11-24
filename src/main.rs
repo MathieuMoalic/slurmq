@@ -2,7 +2,8 @@
 // #![allow(unused_variables)]
 // #![allow(dead_code)]
 // #![allow(clippy::all)]
-// #![warn(clippy::restriction)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 // #![warn(clippy::cargo)]
@@ -47,21 +48,18 @@ fn main() {
         .format_timestamp(None)
         .format_target(false)
         .init();
-    let config = match config::load(cli.host, cli.config_path) {
-        Ok(config) => {
-            debug!("SSH config loaded: {:#?}", config);
-            config
-        }
-        Err(_) => {
-            error!("Error loading the SSH config");
-            return;
-        }
+    let config = if let Ok(config) = config::load(&cli.host, &cli.config_path) {
+        debug!("SSH config loaded: {:#?}", config);
+        config
+    } else {
+        error!("Error loading the SSH config");
+        return;
     };
     match &cli.command {
         Commands::Queue {
             sbatch,
             input_dir,
             dst_dir,
-        } => queue::main(config, sbatch, input_dir, dst_dir),
+        } => queue::main(&config, sbatch, input_dir, dst_dir),
     }
 }

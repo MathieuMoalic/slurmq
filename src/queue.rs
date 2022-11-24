@@ -9,10 +9,8 @@ use std::{
 };
 use walkdir::WalkDir;
 
-pub fn main(config: Config, sbatch: &String, input_dir: &String, dst_dir: &String) {
-    if queue(input_dir, sbatch, &config, dst_dir) == Ok(()) {
-        return;
-    }
+pub fn main(config: &Config, sbatch: &String, input_dir: &String, dst_dir: &String) {
+    if queue(input_dir, sbatch, config, dst_dir) == Ok(()) {}
 }
 
 fn queue(
@@ -25,7 +23,7 @@ fn queue(
     let src_dir = get_src_dir(src_dir)?;
     let src_mx3 = get_src_mx3(&src_dir)?;
     info!("Found these mx3 files: {:#?}", src_mx3);
-    let dst_dir = get_dst_dir(&src_dir, &dst_jobs_dir)?;
+    let dst_dir = get_dst_dir(&src_dir, dst_jobs_dir)?;
     let dst_mx3 = get_dst_mx3(&src_mx3, &src_dir, &dst_dir)?;
     debug!("List of mx3 destination paths: {:#?}", dst_mx3);
     let (sess, sftp) = create_ssh_connection(config)?;
@@ -34,7 +32,7 @@ fn queue(
     info!("Destination directory created");
     transfer_mx3(&sftp, src_mx3, &dst_mx3)?;
     info!("All .mx3 files transfered successfully.");
-    transfer_sbatch(&sftp, &sbatch_path, &dst_jobs_dir)?;
+    transfer_sbatch(&sftp, &sbatch_path, dst_jobs_dir)?;
     info!("Sbatch file transfered successfully.");
     start_jobs(&sess, dst_mx3, sbatch)?;
     info!("All jobs started successfully.");
@@ -45,10 +43,10 @@ fn get_sbatch(sbatch: &String) -> Result<PathBuf, ()> {
     let sbatch = Path::new(sbatch);
     if sbatch.exists() {
         debug!("Found {}", sbatch.display());
-        return Ok(sbatch.to_path_buf());
+        Ok(sbatch.to_path_buf())
     } else {
         error!("Sbatch file {} doesn't exist", sbatch.display());
-        return Err(());
+        Err(())
     }
 }
 
@@ -56,10 +54,10 @@ fn get_src_dir(src_dir: &String) -> Result<PathBuf, ()> {
     let src_dir = Path::new(src_dir);
     if src_dir.exists() {
         debug!("Found input directory {}", src_dir.display());
-        return Ok(src_dir.to_path_buf());
+        Ok(src_dir.to_path_buf())
     } else {
         error!("Input directory {} doesn't exist", src_dir.display());
-        return Err(());
+        Err(())
     }
 }
 
@@ -93,15 +91,12 @@ fn get_src_mx3(src_dir: &Path) -> Result<Vec<PathBuf>, ()> {
 }
 
 fn get_dst_dir(src_dir: &Path, dst_jobs_dir: &String) -> Result<PathBuf, ()> {
-    let parent = match src_dir.parent() {
-        Some(s) => {
-            debug!("Parent dir:  `{}`", s.display());
-            s
-        }
-        None => {
-            error!("Error getting the parent of `{}`", src_dir.display());
-            return Err(());
-        }
+    let parent = if let Some(s) = src_dir.parent() {
+        debug!("Parent dir: `{}`", s.display());
+        s
+    } else {
+        error!("Error getting the parent of `{}`", src_dir.display());
+        return Err(());
     };
     let dst_dir = match src_dir.strip_prefix(parent) {
         Ok(s) => {
@@ -117,7 +112,7 @@ fn get_dst_dir(src_dir: &Path, dst_jobs_dir: &String) -> Result<PathBuf, ()> {
             return Err(());
         }
     };
-    let dst_dir = Path::new(&format!("{}", dst_jobs_dir)).join(dst_dir);
+    let dst_dir = Path::new(&dst_jobs_dir.to_string()).join(dst_dir);
     debug!("Destination dir: `{}`", dst_dir.display());
     Ok(dst_dir)
 }
@@ -172,28 +167,34 @@ fn create_ssh_connection(config: &config::Config) -> Result<(Session, Sftp), ()>
         }
     };
     sess.set_tcp_stream(tcp);
-    match sess.handshake() {
-        Ok(_) => debug!("Successful TCP handshake with the server."),
-        Err(_) => error!("Handshake with the server failed."),
+    if sess.handshake().is_ok() {
+        debug!("Successful TCP handshake with the server.");
+    } else {
+        error!("Handshake with the server failed.");
     };
-    match sess.userauth_pubkey_file(&config.user, None, &config.key, None) {
-        Ok(_) => debug!(
+    if sess
+        .userauth_pubkey_file(&config.user, None, &config.key, None)
+        .is_ok()
+    {
+        debug!(
             "Sucessful SSH authentication to `{}` with keyfile `{}`",
             &config.addr,
             &config.key.display()
-        ),
-        Err(_) => error!(
+        );
+    } else {
+        error!(
             "SSH authentication failed to `{}` with keyfile `{}`",
             &config.addr,
             &config.key.display()
-        ),
-    };
+        );
+    }
+
     let sftp = match sess.sftp() {
         Ok(sftp) => {
             debug!("Made SFTP connection");
             sftp
         }
-        Err(e) => {
+        Err(_e) => {
             error!("Failed making the SFTP connection");
             return Err(());
         }
@@ -210,90 +211,27 @@ fn create_dst_dir(sess: &Session, dst_dir: &Path) -> Result<(), ()> {
 
 fn transfer_mx3(sftp: &Sftp, src_mx3: Vec<PathBuf>, dst_mx3: &[PathBuf]) -> Result<(), ()> {
     for (src, dst) in src_mx3.into_iter().zip(dst_mx3.iter()) {
-        let src_buf = match fs::read(&src) {
-            Ok(src_buf) => {
-                debug!("Read source file {} into buffer", src.display());
-                src_buf
-            }
-            Err(_) => {
-                error!("Couldn't read source file {} into buffer", src.display());
-                return Err(());
-            }
-        };
-        let mut dest_buf = match sftp.create(dst) {
-            Ok(dest_buf) => {
-                debug!("Created destination buffer {}", src.display());
-                dest_buf
-            }
-            Err(_) => {
-                error!("Couldn't create destination buffer {}", src.display());
-                return Err(());
-            }
-        };
-        match dest_buf.write_all(&src_buf) {
-            Ok(dest_buf) => {
-                debug!(
-                    "Wrote source file {} into destination buffer {}",
-                    src.display(),
-                    dst.display()
-                );
-                dest_buf
-            }
-            Err(_) => {
-                error!(
-                    "Couldn't write source file {} into destination buffer {}",
-                    src.display(),
-                    dst.display()
-                );
-                return Err(());
-            }
-        };
-        info!("Transfered {}", dst.display());
-    }
-    Ok(())
-}
-
-fn transfer_sbatch(sftp: &Sftp, src: &PathBuf, dst_jobs_dir: &String) -> Result<(), ()> {
-    let src_buf = match fs::read(&src) {
-        Ok(src_buf) => {
+        let src_buf = if let Ok(src_buf) = fs::read(&src) {
             debug!("Read source file {} into buffer", src.display());
             src_buf
-        }
-        Err(_) => {
+        } else {
             error!("Couldn't read source file {} into buffer", src.display());
             return Err(());
-        }
-    };
-    let dst = match Path::new(src).file_name() {
-        Some(dst) => {
-            debug!("Sbatch filename: {}", dst.to_string_lossy());
-            dst.as_ref()
-        }
-        None => {
-            error!("Couldn't get sbatch filename");
-            return Err(());
-        }
-    };
-    let mut dst_buf = match sftp.create(dst) {
-        Ok(dest_buf) => {
+        };
+        let mut dest_buf = if let Ok(dest_buf) = sftp.create(dst) {
             debug!("Created destination buffer {}", src.display());
             dest_buf
-        }
-        Err(_) => {
+        } else {
             error!("Couldn't create destination buffer {}", src.display());
             return Err(());
-        }
-    };
-    match dst_buf.write_all(&src_buf) {
-        Ok(dest_buf) => {
+        };
+        if let Ok(_dest_buf) = dest_buf.write_all(&src_buf) {
             debug!(
                 "Wrote source file {} into destination buffer {}",
                 src.display(),
                 dst.display()
             );
-            dest_buf
-        }
-        Err(_) => {
+        } else {
             error!(
                 "Couldn't write source file {} into destination buffer {}",
                 src.display(),
@@ -301,7 +239,47 @@ fn transfer_sbatch(sftp: &Sftp, src: &PathBuf, dst_jobs_dir: &String) -> Result<
             );
             return Err(());
         }
+        info!("Transfered {}", dst.display());
+    }
+    Ok(())
+}
+
+fn transfer_sbatch(sftp: &Sftp, src: &PathBuf, _dst_jobs_dir: &str) -> Result<(), ()> {
+    let src_buf = if let Ok(src_buf) = fs::read(src) {
+        debug!("Read source file {} into buffer", src.display());
+        src_buf
+    } else {
+        error!("Couldn't read source file {} into buffer", src.display());
+        return Err(());
     };
+    let dst = if let Some(dst) = Path::new(src).file_name() {
+        debug!("Sbatch filename: {}", dst.to_string_lossy());
+        dst.as_ref()
+    } else {
+        error!("Couldn't get sbatch filename");
+        return Err(());
+    };
+    let mut dst_buf = if let Ok(dest_buf) = sftp.create(dst) {
+        debug!("Created destination buffer {}", src.display());
+        dest_buf
+    } else {
+        error!("Couldn't create destination buffer {}", src.display());
+        return Err(());
+    };
+    if dst_buf.write_all(&src_buf).is_ok() {
+        debug!(
+            "Wrote source file {} into destination buffer {}",
+            src.display(),
+            dst.display()
+        );
+    } else {
+        error!(
+            "Couldn't write source file {} into destination buffer {}",
+            src.display(),
+            dst.display()
+        );
+        return Err(());
+    }
     info!("Transfered {}", dst.display());
 
     Ok(())
@@ -390,11 +368,20 @@ fn send_command(sess: &Session, command: &String) -> Result<String, ()> {
 
 fn start_jobs(sess: &Session, dst_mx3: Vec<PathBuf>, sbatch: &String) -> Result<(), ()> {
     for mx3 in dst_mx3 {
-        let mx3_path = mx3.to_str().unwrap();
+        let Some(mx3_path) = mx3.to_str() else {
+            error!("Error turning {} into a string",mx3.display());
+            return Err(());
+        };
+        debug!("Got `{mx3_path}`");
         let zarr_path = mx3_path.replace(".mx3", ".zarr");
         let log_path = mx3_path.replace(".mx3", ".zarr/slurm.logs");
         // let calc_log_path = mx3_path.replace(".mx3", ".zarr/slurm_calc.logs");
-        let job_name = mx3.file_stem().unwrap().to_str().unwrap();
+        let Some(job_name) = mx3.file_name() else {
+            error!("Error getting the file name from {}",mx3.display());
+            return Err(());};
+        let Some(job_name) = job_name.to_str() else {
+            error!("Error getting turning the file name to a string {}",mx3.display());
+            return Err(());};
         let command = format!("mkdir -p {zarr_path}");
         let stdout = send_command(sess, &command)?;
         debug!("Sent command: `{}` \n  `{}`", command, stdout);
