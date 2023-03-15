@@ -6,20 +6,16 @@
 #![warn(clippy::expect_used)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-// #![warn(clippy::cargo)]
-mod config;
 mod queue;
+mod ssh;
 mod tunnel;
 
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use log::{debug, error};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[clap(flatten)]
-    verbose: clap_verbosity_flag::Verbosity,
-
     #[command(subcommand)]
     command: Commands,
     #[arg(long, default_value_t = String::from("~/.ssh/config"))]
@@ -39,27 +35,20 @@ enum Commands {
         #[arg(long, default_value_t = String::from("./jobs"))]
         dst_dir: String,
     },
+    /// TCP tunnel to interact with running jobs
+    Tunnel {},
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    env_logger::Builder::new()
-        .filter_level(cli.verbose.log_level_filter())
-        .format_timestamp(None)
-        .format_target(false)
-        .init();
-    let config = if let Ok(config) = config::load(&cli.host, &cli.config_path) {
-        debug!("SSH config loaded: {:#?}", config);
-        config
-    } else {
-        error!("Error loading the SSH config");
-        return;
-    };
+    let ssh_con = ssh::Ssh::new(&cli.host, &cli.config_path)?;
     match &cli.command {
         Commands::Queue {
             sbatch,
             input_dir,
             dst_dir,
-        } => queue::main(&config, sbatch, input_dir, dst_dir),
-    }
+        } => queue::main(&ssh_con, input_dir, sbatch, dst_dir)?,
+        Commands::Tunnel {} => tunnel::main(&ssh_con)?,
+    };
+    Ok(())
 }
